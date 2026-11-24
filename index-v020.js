@@ -7,12 +7,16 @@
     const STORE_NAME = 'scenes';
     const FALLBACK_KEY = 'sillytavern-theatre-vault-fallback';
     const TAG_COLOR_KEY = 'sillytavern-theatre-vault-tag-colors';
+    const MOBILE_POSITION_KEY = 'sillytavern-theatre-vault-mobile-position';
     const PAGE_SIZE = 60;
     const MAX_BATCH_DRAFTS = 50;
     const MOBILE_TARGET_ROWS = 5;
     const MOBILE_FALLBACK_ROWS = 4;
     const CLOSE_ANIMATION_MS = 220;
     const INSERT_FEEDBACK_MS = 520;
+    const DRAG_HOLD_MS = 320;
+    const DRAG_CANCEL_DISTANCE = 8;
+    const MOBILE_EDGE_GAP = 10;
 
     let dbPromise;
     let useFallbackStorage = false;
@@ -27,9 +31,33 @@
     let pendingInsertTimer = null;
     let mobileFitFrame = null;
     let compactRowOuterHeight = 73;
+    let mobilePosition = readMobilePosition();
+    let sheetDrag = null;
     let ui = {};
     const searchCache = new Map();
     const tagHueMap = readTagHueMap();
+
+    function readMobilePosition() {
+        try {
+            const value = JSON.parse(localStorage.getItem(MOBILE_POSITION_KEY) || 'null');
+            if (!value || !Number.isFinite(value.x) || !Number.isFinite(value.y)) return null;
+            return {
+                x: Math.min(1, Math.max(0, value.x)),
+                y: Math.min(1, Math.max(0, value.y)),
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    function saveMobilePosition() {
+        try {
+            if (mobilePosition) localStorage.setItem(MOBILE_POSITION_KEY, JSON.stringify(mobilePosition));
+            else localStorage.removeItem(MOBILE_POSITION_KEY);
+        } catch {
+            // Position persistence is optional when browser storage is unavailable.
+        }
+    }
 
     function readTagHueMap() {
         try {
@@ -296,6 +324,10 @@
         sheet.setAttribute('aria-label', '小剧场仓库');
 
         const handle = createElement('div', 'tv-drag-handle');
+        handle.tabIndex = 0;
+        handle.setAttribute('role', 'button');
+        handle.setAttribute('aria-label', '长按拖动窗口，双击恢复居中');
+        handle.title = '长按拖动，双击恢复居中';
         const header = createElement('header', 'tv-header');
         const titleWrap = createElement('div', 'tv-title-wrap');
         const title = createElement('h2', 'tv-title', '小剧场仓库');
@@ -310,7 +342,8 @@
         menu.hidden = true;
         const importButton = makeButton('导入备份', '导入备份', 'tv-menu-item');
         const exportButton = makeButton('导出备份', '导出全部小剧场', 'tv-menu-item');
-        menu.append(importButton, exportButton);
+        const resetPositionButton = makeButton('恢复窗口居中', '恢复悬浮窗默认位置', 'tv-menu-item');
+        menu.append(importButton, exportButton, resetPositionButton);
         menuWrap.append(menuButton, menu);
         const closeButton = makeButton('×', '关闭', 'tv-icon-button');
         headerActions.append(addButton, menuWrap, closeButton);
@@ -364,6 +397,7 @@
         ui = {
             overlay,
             sheet,
+            handle,
             count,
             addButton,
             tools,
@@ -407,6 +441,10 @@
             menu.hidden = true;
             exportBackup();
         });
+        resetPositionButton.addEventListener('click', () => {
+            menu.hidden = true;
+            resetMobilePosition();
+        });
         fileInput.addEventListener('change', importBackup);
         cancelEdit.addEventListener('click', cancelEditor);
         addDraft.addEventListener('click', addEditorDraft);
@@ -424,8 +462,10 @@
             visibleLimit = PAGE_SIZE;
             renderList();
         });
+        setupMobileSheetDrag(handle);
         const refitForViewport = () => {
             if (!ui.list?.hidden) scheduleMobileSheetFit();
+            else requestAnimationFrame(applyMobilePosition);
         };
         window.addEventListener('resize', refitForViewport, { passive: true });
         globalThis.visualViewport?.addEventListener('resize', refitForViewport, { passive: true });
@@ -481,7 +521,8 @@
             ui.overlay.classList.add('is-open');
             ui.overlay.setAttribute('aria-hidden', 'false');
             ui.sheet.style.opacity = '1';
-            ui.sheet.style.transform = 'translateY(0) scale(1)';
+            ui.sheet.style.removeProperty('transform');
+            requestAnimationFrame(applyMobilePosition);
         } else {
             ui.overlay.classList.remove('is-open');
             ui.overlay.setAttribute('aria-hidden', 'true');
@@ -841,6 +882,168 @@
         return Number.isFinite(number) ? number : 0;
     }
 
+    function mobileViewportSize() {
+        return {
+            width: globalThis.visualViewport?.width || globalThis.innerWidth || 0,
+            height: globalThis.visualViewport?.height || globalThis.innerHeight || 0,
+        };
+    }
+
+    function mobileOffsetLimits() {
+        const viewport = mobileViewportSize();
+        const rect = ui.sheet?.getBoundingClientRect();
+        if (!rect || !viewport.width || !viewport.height) return { x: 0, y: 0 };
+        return {
+            x: Math.max(0, (viewport.width - rect.width) / 2 - MOBILE_EDGE_GAP),
+            y: Math.max(0, (viewport.height - rect.height) / 2 - MOBILE_EDGE_GAP),
+        };
+    }
+
+    function clampMobileOffset(x, y) {
+        const limits = mobileOffsetLimits();
+        return {
+            x: Math.min(limits.x, Math.max(-limits.x, x)),
+            y: Math.min(limits.y, Math.max(-limits.y, y)),
+        };
+    }
+
+    function setMobileOffset(x, y) {
+        const offset = clampMobileOffset(x, y);
+        ui.sheet.style.setProperty('--tv-mobile-offset-x', `${Math.round(offset.x)}px`);
+        ui.sheet.style.setProperty('--tv-mobile-offset-y', `${Math.round(offset.y)}px`);
+        return offset;
+    }
+
+    function currentMobileOffset() {
+        const style = getComputedStyle(ui.sheet);
+        return {
+            x: cssPixels(style.getPropertyValue('--tv-mobile-offset-x')),
+            y: cssPixels(style.getPropertyValue('--tv-mobile-offset-y')),
+        };
+    }
+
+    function applyMobilePosition() {
+        if (!ui.sheet || sheetDrag?.active) return;
+        const mobileLayout = globalThis.matchMedia?.('(max-width: 767px)');
+        if (!mobileLayout?.matches) {
+            ui.sheet.style.removeProperty('--tv-mobile-offset-x');
+            ui.sheet.style.removeProperty('--tv-mobile-offset-y');
+            return;
+        }
+        if (!mobilePosition) {
+            setMobileOffset(0, 0);
+            return;
+        }
+        const viewport = mobileViewportSize();
+        setMobileOffset(
+            (mobilePosition.x - 0.5) * viewport.width,
+            (mobilePosition.y - 0.5) * viewport.height,
+        );
+    }
+
+    function rememberCurrentMobilePosition() {
+        const viewport = mobileViewportSize();
+        const offset = currentMobileOffset();
+        if (!viewport.width || !viewport.height) return;
+        mobilePosition = {
+            x: Math.min(1, Math.max(0, 0.5 + offset.x / viewport.width)),
+            y: Math.min(1, Math.max(0, 0.5 + offset.y / viewport.height)),
+        };
+        saveMobilePosition();
+    }
+
+    function resetMobilePosition() {
+        mobilePosition = null;
+        saveMobilePosition();
+        setMobileOffset(0, 0);
+        toast('已恢复居中', 'info');
+    }
+
+    function setupMobileSheetDrag(handle) {
+        let holdTimer = null;
+
+        const clearHold = () => {
+            clearTimeout(holdTimer);
+            holdTimer = null;
+        };
+
+        const finishDrag = event => {
+            clearHold();
+            if (!sheetDrag || event.pointerId !== sheetDrag.pointerId) return;
+            const wasActive = sheetDrag.active;
+            sheetDrag = null;
+            ui.sheet.classList.remove('is-positioning');
+            handle.classList.remove('is-dragging');
+            if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+            if (wasActive) {
+                rememberCurrentMobilePosition();
+                toast('位置已固定', 'info');
+                event.preventDefault();
+            }
+        };
+
+        handle.addEventListener('pointerdown', event => {
+            if (event.button !== undefined && event.button !== 0) return;
+            if (!globalThis.matchMedia?.('(max-width: 767px)')?.matches) return;
+            clearHold();
+            const startOffset = currentMobileOffset();
+            sheetDrag = {
+                pointerId: event.pointerId,
+                startX: event.clientX,
+                startY: event.clientY,
+                offsetX: startOffset.x,
+                offsetY: startOffset.y,
+                active: false,
+            };
+            handle.setPointerCapture?.(event.pointerId);
+            holdTimer = setTimeout(() => {
+                if (!sheetDrag || sheetDrag.pointerId !== event.pointerId) return;
+                sheetDrag.active = true;
+                ui.sheet.classList.add('is-positioning');
+                handle.classList.add('is-dragging');
+                globalThis.navigator?.vibrate?.(18);
+            }, DRAG_HOLD_MS);
+        });
+
+        handle.addEventListener('pointermove', event => {
+            if (!sheetDrag || event.pointerId !== sheetDrag.pointerId) return;
+            const deltaX = event.clientX - sheetDrag.startX;
+            const deltaY = event.clientY - sheetDrag.startY;
+            if (!sheetDrag.active) {
+                if (Math.hypot(deltaX, deltaY) > DRAG_CANCEL_DISTANCE) {
+                    clearHold();
+                    sheetDrag = null;
+                    if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+                }
+                return;
+            }
+            setMobileOffset(sheetDrag.offsetX + deltaX, sheetDrag.offsetY + deltaY);
+            event.preventDefault();
+        });
+
+        handle.addEventListener('pointerup', finishDrag);
+        handle.addEventListener('pointercancel', finishDrag);
+        handle.addEventListener('lostpointercapture', () => {
+            clearHold();
+            if (!sheetDrag) return;
+            const wasActive = sheetDrag.active;
+            sheetDrag = null;
+            ui.sheet.classList.remove('is-positioning');
+            handle.classList.remove('is-dragging');
+            if (wasActive) rememberCurrentMobilePosition();
+        });
+        handle.addEventListener('dblclick', event => {
+            event.preventDefault();
+            resetMobilePosition();
+        });
+        handle.addEventListener('contextmenu', event => event.preventDefault());
+        handle.addEventListener('keydown', event => {
+            if (event.key !== 'Home' && event.key !== 'Enter') return;
+            event.preventDefault();
+            resetMobilePosition();
+        });
+    }
+
     function fitMobileSheetToRows() {
         if (!ui.sheet || !ui.main || !ui.list) return;
         const mobileLayout = globalThis.matchMedia?.('(max-width: 767px)');
@@ -889,6 +1092,7 @@
 
         ui.sheet.style.setProperty('--tv-mobile-sheet-height', `${targetHeight}px`);
         ui.sheet.dataset.visibleRows = String(visibleRows);
+        applyMobilePosition();
     }
 
     function buildRow(item) {
@@ -1132,7 +1336,7 @@
             observer.observe(document.body, { childList: true, subtree: true });
             setTimeout(() => observer.disconnect(), 30000);
         }
-        console.info(`[${EXTENSION_ID}] ready v0.6.2`);
+        console.info(`[${EXTENSION_ID}] ready v0.6.3`);
     }
 
     if (document.readyState === 'loading') {

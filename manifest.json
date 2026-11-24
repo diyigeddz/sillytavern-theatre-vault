@@ -3,9 +3,9 @@
   "loading_order": 20,
   "requires": [],
   "optional": [],
-  "js": "index-v020.js?v=062",
-  "css": "style-v020.css?v=062",
+  "js": "index-v020.js?v=063",
+  "css": "style-v020.css?v=063",
   "author": "Dio",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "homePage": "https://github.com/diyigeddz/sillytavern-theatre-vault"
 }
