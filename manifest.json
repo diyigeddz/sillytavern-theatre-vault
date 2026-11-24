@@ -1,0 +1,11 @@
+{
+  "display_name": "小剧场仓库",
+  "loading_order": 20,
+  "requires": [],
+  "optional": [],
+  "js": "index-v020.js?v=062",
+  "css": "style-v020.css?v=062",
+  "author": "Dio",
+  "version": "0.6.2",
+  "homePage": "https://github.com/diyigeddz/sillytavern-theatre-vault"
+}
