@@ -14,8 +14,8 @@
     const MOBILE_FALLBACK_ROWS = 4;
     const CLOSE_ANIMATION_MS = 220;
     const INSERT_FEEDBACK_MS = 520;
-    const DRAG_HOLD_MS = 320;
-    const DRAG_CANCEL_DISTANCE = 8;
+    const DRAG_HOLD_MS = 180;
+    const DRAG_START_DISTANCE = 3;
     const MOBILE_EDGE_GAP = 10;
 
     let dbPromise;
@@ -326,8 +326,8 @@
         const handle = createElement('div', 'tv-drag-handle');
         handle.tabIndex = 0;
         handle.setAttribute('role', 'button');
-        handle.setAttribute('aria-label', '长按拖动窗口，双击恢复居中');
-        handle.title = '长按拖动，双击恢复居中';
+        handle.setAttribute('aria-label', '按住拖动窗口，连续轻点两次恢复居中');
+        handle.title = '按住拖动，轻点两次恢复居中';
         const header = createElement('header', 'tv-header');
         const titleWrap = createElement('div', 'tv-title-wrap');
         const title = createElement('h2', 'tv-title', '小剧场仓库');
@@ -961,10 +961,19 @@
 
     function setupMobileSheetDrag(handle) {
         let holdTimer = null;
+        let lastTapAt = 0;
 
         const clearHold = () => {
             clearTimeout(holdTimer);
             holdTimer = null;
+        };
+
+        const activateDrag = pointerId => {
+            if (!sheetDrag || sheetDrag.pointerId !== pointerId || sheetDrag.active) return;
+            sheetDrag.active = true;
+            ui.sheet.classList.add('is-positioning');
+            handle.classList.add('is-dragging');
+            globalThis.navigator?.vibrate?.(18);
         };
 
         const finishDrag = event => {
@@ -974,11 +983,19 @@
             sheetDrag = null;
             ui.sheet.classList.remove('is-positioning');
             handle.classList.remove('is-dragging');
-            if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
             if (wasActive) {
                 rememberCurrentMobilePosition();
                 toast('位置已固定', 'info');
                 event.preventDefault();
+                lastTapAt = 0;
+            } else {
+                const now = Date.now();
+                if (now - lastTapAt < 360) {
+                    lastTapAt = 0;
+                    resetMobilePosition();
+                } else {
+                    lastTapAt = now;
+                }
             }
         };
 
@@ -995,47 +1012,24 @@
                 offsetY: startOffset.y,
                 active: false,
             };
-            handle.setPointerCapture?.(event.pointerId);
-            holdTimer = setTimeout(() => {
-                if (!sheetDrag || sheetDrag.pointerId !== event.pointerId) return;
-                sheetDrag.active = true;
-                ui.sheet.classList.add('is-positioning');
-                handle.classList.add('is-dragging');
-                globalThis.navigator?.vibrate?.(18);
-            }, DRAG_HOLD_MS);
+            holdTimer = setTimeout(() => activateDrag(event.pointerId), DRAG_HOLD_MS);
         });
 
-        handle.addEventListener('pointermove', event => {
+        document.addEventListener('pointermove', event => {
             if (!sheetDrag || event.pointerId !== sheetDrag.pointerId) return;
             const deltaX = event.clientX - sheetDrag.startX;
             const deltaY = event.clientY - sheetDrag.startY;
-            if (!sheetDrag.active) {
-                if (Math.hypot(deltaX, deltaY) > DRAG_CANCEL_DISTANCE) {
-                    clearHold();
-                    sheetDrag = null;
-                    if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
-                }
-                return;
+            if (!sheetDrag.active && Math.hypot(deltaX, deltaY) >= DRAG_START_DISTANCE) {
+                clearHold();
+                activateDrag(event.pointerId);
             }
+            if (!sheetDrag.active) return;
             setMobileOffset(sheetDrag.offsetX + deltaX, sheetDrag.offsetY + deltaY);
             event.preventDefault();
-        });
+        }, { passive: false, capture: true });
 
-        handle.addEventListener('pointerup', finishDrag);
-        handle.addEventListener('pointercancel', finishDrag);
-        handle.addEventListener('lostpointercapture', () => {
-            clearHold();
-            if (!sheetDrag) return;
-            const wasActive = sheetDrag.active;
-            sheetDrag = null;
-            ui.sheet.classList.remove('is-positioning');
-            handle.classList.remove('is-dragging');
-            if (wasActive) rememberCurrentMobilePosition();
-        });
-        handle.addEventListener('dblclick', event => {
-            event.preventDefault();
-            resetMobilePosition();
-        });
+        document.addEventListener('pointerup', finishDrag, { capture: true });
+        document.addEventListener('pointercancel', finishDrag, { capture: true });
         handle.addEventListener('contextmenu', event => event.preventDefault());
         handle.addEventListener('keydown', event => {
             if (event.key !== 'Home' && event.key !== 'Enter') return;
@@ -1336,7 +1330,7 @@
             observer.observe(document.body, { childList: true, subtree: true });
             setTimeout(() => observer.disconnect(), 30000);
         }
-        console.info(`[${EXTENSION_ID}] ready v0.6.3`);
+        console.info(`[${EXTENSION_ID}] ready v0.6.4`);
     }
 
     if (document.readyState === 'loading') {

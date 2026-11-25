@@ -89,7 +89,7 @@
 .tv-drag-handle {
     display: none;
     position: relative;
-    width: 86px;
+    width: 120px;
     height: 20px;
     margin: 0 auto;
     cursor: grab;
@@ -108,14 +108,14 @@
     border-radius: 99px;
     background: var(--tv-border);
     transform: translateX(-50%);
-    transition: width .16s ease, background .16s ease;
+    transition: none;
 }
 
 .tv-drag-handle.is-dragging { cursor: grabbing; }
 
 .tv-drag-handle.is-dragging::before {
-    width: 54px;
-    background: color-mix(in srgb, var(--tv-accent) 60%, var(--tv-border));
+    width: 42px;
+    background: var(--tv-border);
 }
 
 .tv-sheet.is-positioning { transition: opacity .18s ease; }
